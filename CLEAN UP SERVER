@@ -1,0 +1,145 @@
+local ServerLifecycle = {}
+
+--------------------------------------------------
+-- CONFIG
+--------------------------------------------------
+local DEBUG = false
+
+--------------------------------------------------
+-- STORAGE
+--------------------------------------------------
+-- buckets[ctx] = {
+--   connections = {},
+--   cleaning = false,
+--   cleaners = {},
+--   instances = {},
+--   alive = true,
+-- }
+local buckets = {}
+
+--------------------------------------------------
+-- DEBUG
+--------------------------------------------------
+local function debugPrint(...)
+	if DEBUG then
+		warn("[AE] SERVER CLEAN UP", ...)
+	end
+end
+
+--------------------------------------------------
+-- INTERNAL
+--------------------------------------------------
+
+local function getBucket(ctx)
+	if not buckets[ctx] then
+		buckets[ctx] = {
+			connections = {},
+			cleaning = false,
+			cleaners = {},
+			instances = {},
+			alive = true,
+		}
+	end
+	return buckets[ctx]
+end
+
+local function uniqueInsert(list, item)
+	for _, v in ipairs(list) do
+		if v == item then return end
+	end
+	list[#list + 1] = item
+end
+
+--------------------------------------------------
+-- API LAMA
+--------------------------------------------------
+
+function ServerLifecycle.trackConnection(ctx, conn)
+	if conn then
+		uniqueInsert(getBucket(ctx).connections, conn)
+	end
+end
+
+function ServerLifecycle.ensureSingle(ctx)
+	if buckets[ctx] then
+		debugPrint("ensureSingle -> cleanup", ctx)
+		ServerLifecycle.cleanup(ctx, "ensure single")
+	end
+end
+
+function ServerLifecycle.cleanup(ctx, reason)
+	local b = buckets[ctx]
+	if not b or b.cleaning then return end
+	b.cleaning = true
+	b.alive = false
+
+	debugPrint("cleanup", ctx, reason)
+
+	-- DISCONNECT CONNECTION
+	for _, c in ipairs(b.connections) do
+		pcall(function()
+			if c and c.Disconnect then
+				c:Disconnect()
+			end
+		end)
+	end
+
+	-- CLEANER OPSIONAL
+	for _, fn in ipairs(b.cleaners) do
+		pcall(fn)
+	end
+
+	-- DESTROY INSTANCE OPSIONAL
+	for _, inst in ipairs(b.instances) do
+		pcall(function()
+			if inst and inst.Parent then
+				inst:Destroy()
+			end
+		end)
+	end
+
+	buckets[ctx] = nil
+end
+
+function ServerLifecycle.cleanupAll(reason)
+	for ctx in pairs(buckets) do
+		ServerLifecycle.cleanup(ctx, reason or "cleanup all")
+	end
+end
+
+--------------------------------------------------
+-- API BARU
+--------------------------------------------------
+
+function ServerLifecycle.isAlive(ctx)
+	local b = buckets[ctx]
+	return b ~= nil and b.alive == true
+end
+
+function ServerLifecycle.trackCleaner(ctx, fn)
+	if type(fn) == "function" then
+		uniqueInsert(getBucket(ctx).cleaners, fn)
+	end
+end
+
+function ServerLifecycle.trackInstance(ctx, inst)
+	if typeof(inst) == "Instance" then
+		uniqueInsert(getBucket(ctx).instances, inst)
+	end
+end
+
+function ServerLifecycle.cleanupDelay(ctx, seconds)
+	task.delay(seconds or 0, function()
+		ServerLifecycle.cleanup(ctx, "delayed cleanup")
+	end)
+end
+
+--------------------------------------------------
+-- AUTO CLEANUP SERVER
+--------------------------------------------------
+
+game:BindToClose(function()
+	ServerLifecycle.cleanupAll("server shutting down")
+end)
+
+return ServerLifecycle
